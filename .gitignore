@@ -7,6 +7,6 @@ datasets.zip
 log/**
 log_tensorboard/**
 *.png
-*.txt
+# *.txt
 
 .venv

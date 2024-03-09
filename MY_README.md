@@ -2,10 +2,16 @@
 
 1. Set up virtual environment
 ```bash
-$ python3 -m venv .venv
-$ source .venv/bin/activate
-$ pip install --upgrade pip
-$ pip install -r requirements.txt
+python3 -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip
+
+pip install pyyaml
+python3 environment_yaml2requirements_txt.py
+
+pip install -r requirements.txt
+pip install scikit-learn scipy matplotlib
+pip install torch==2.2.0 --index-url https://download.pytorch.org/whl/cu118
 ```
 
 2. Log in to wandb (prepare your API key)
