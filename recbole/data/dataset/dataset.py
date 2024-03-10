@@ -16,8 +16,10 @@ import copy
 import pickle
 import os
 import yaml
+import json
 from collections import Counter, defaultdict
 from logging import getLogger
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -966,6 +968,10 @@ class Dataset(object):
             elif ftype == FeatureType.TOKEN_SEQ:
                 split_point = np.cumsum(feat[field].agg(len))[:-1]
                 feat[field] = np.split(new_ids, split_point)
+            
+            if field == "user_id" or field == "item_id":
+                with open(Path(self.dataset_path, f"{field}2token_id.json"), "w") as fp:
+                    json.dump(token_id, fp)
 
     def _change_feat_format(self):
         """Change feat format from :class:`pandas.DataFrame` to :class:`Interaction`.
