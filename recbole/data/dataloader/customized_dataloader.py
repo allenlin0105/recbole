@@ -1193,3 +1193,74 @@ class DADACLRecTrainDataLoader(CL4RecTrainDataLoader):
         
         self.dataset.inter_feat.interaction["reverse_seqs"] =  new_reverse_seqs
 
+
+class LLMRecTrainDataLoader(CLTrainDataLoader):
+
+    def __init__(self, config, dataset, sampler, shuffle=False):
+        
+        super().__init__(config, dataset, sampler, shuffle=shuffle)
+
+        if config['model'] == 'ContraRec':
+            augmentation_type = ['mask', 'reorder', 'random']
+        else:
+            augmentation_type = ['crop', 'mask', 'reorder', 'random']
+            
+        self.augmentation_table = {aug_type: idx for idx, aug_type in enumerate(augmentation_type)}
+        
+        self.aug_type1 = config['aug_type1']
+        self.aug_type2 = config['aug_type2'] if config['aug_type2'] else config['aug_type1']
+        
+        self.eta = config['eta'] if config['model'] != 'ContraRec' else None # for crop
+        self.gamma = config['gamma']  # for mask
+        self.beta = config['beta']  # for reorder
+        self.model_name = config['model']
+        
+    
+    def _contrastive_learning_augmentation(self, cur_data):
+        
+        sequences = cur_data[self.iid_list_field]
+        lengths = cur_data[self.item_list_length_field]
+        aug_seq1, aug_len1 = self._augmentation(sequences, lengths, aug_type=self.aug_type1)
+        aug_seq2, aug_len2 = self._augmentation(sequences, lengths, aug_type=self.aug_type2)
+        cur_data.update(Interaction({'aug1': aug_seq1, 'aug_len1': aug_len1,
+                                     'aug2': aug_seq2, 'aug_len2': aug_len2}))
+        return cur_data
+
+    def _augmentation(self, sequences, lengths, targets=None, aug_type='random'):
+        
+        aug_idx = self.augmentation_table[aug_type]
+        aug_sequences = torch.zeros_like(sequences)
+        aug_lengths = torch.zeros_like(lengths)
+        def crop(seq, length):
+            new_seq = torch.zeros_like(seq)
+            new_seq_length = max(1, int(length * self.eta))
+            crop_start = random.randint(0, length - new_seq_length)
+            new_seq[:new_seq_length] = seq[crop_start:crop_start + new_seq_length]
+            return new_seq, new_seq_length
+        
+        def mask(seq, length):
+            num_mask = int(length * self.gamma)
+            mask_index = random.sample(range(length), k=num_mask)
+            seq[mask_index] = self.dataset.item_num  # token 0 has been used for semantic masking
+            return seq, length
+        
+        def reorder(seq, length):
+            num_reorder = int(length * self.beta)
+            reorder_start = random.randint(0, length - num_reorder)
+            shuffle_index = torch.randperm(num_reorder) + reorder_start
+            seq[reorder_start:reorder_start + num_reorder] = seq[shuffle_index]
+            return seq, length
+
+        if self.model_name == 'ContraRec':
+            aug_func = [mask, reorder]
+        else:
+            aug_func = [crop, mask, reorder]
+        
+        for i, (seq, length) in enumerate(zip(sequences, lengths)):
+            
+            if aug_type == 'random':
+                aug_idx = random.randrange(len(aug_func))
+            
+            aug_sequences[i][:], aug_lengths[i] = aug_func[aug_idx](seq.clone(), length)
+
+        return aug_sequences, aug_lengths

@@ -23,3 +23,4 @@ metrics: [Recall, Precision, NDCG, MAP, Hit]
 topk: [1, 5, 10, 20, 100]
 valid_metric: Recall@20
 eval_batch_size: 2048
+stopping_step: 20
