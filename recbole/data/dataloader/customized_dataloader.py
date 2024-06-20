@@ -7,10 +7,16 @@ recbole.data.dataloader.customized_dataloader
 ################################################
 """
 
+import csv
+from pathlib import Path
+
 import numpy as np
 import torch
+import torch.nn.functional as F
+from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 import random
 import copy
+from tqdm import trange
 
 from scipy.sparse import coo_matrix
 from sklearn.preprocessing import normalize
@@ -1200,30 +1206,130 @@ class LLMRecTrainDataLoader(CLTrainDataLoader):
         
         super().__init__(config, dataset, sampler, shuffle=shuffle)
 
-        if config['model'] == 'ContraRec':
-            augmentation_type = ['mask', 'reorder', 'random']
-        else:
-            augmentation_type = ['crop', 'mask', 'reorder', 'random']
+        augmentation_type = ['crop', 'mask', 'reorder', 'random']
             
         self.augmentation_table = {aug_type: idx for idx, aug_type in enumerate(augmentation_type)}
         
         self.aug_type1 = config['aug_type1']
         self.aug_type2 = config['aug_type2'] if config['aug_type2'] else config['aug_type1']
         
-        self.eta = config['eta'] if config['model'] != 'ContraRec' else None # for crop
+        self.eta = config['eta']
         self.gamma = config['gamma']  # for mask
         self.beta = config['beta']  # for reorder
         self.model_name = config['model']
+        self.device = config['device']
+
+        self._sl_augmentation()
+
+        # load embed for scoring
+        # self._load_embed(dataset)
+
+    def _load_embed(self, dataset):
+        MODELPATH = "meta-llama/Meta-Llama-3-8B-Instruct"
+
+        llm = AutoModelForCausalLM.from_pretrained(
+            MODELPATH,    
+            device_map={"": self.device},
+            quantization_config=BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_compute_dtype=torch.bfloat16,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_use_double_quant=True,
+            ),
+            torch_dtype=torch.bfloat16,
+            trust_remote_code=True,      
+        )
+
+        tokenizer = AutoTokenizer.from_pretrained(
+            MODELPATH,
+            trust_remote_code=True,
+            padding_side="left",
+        )      
+        tokenizer.pad_token = tokenizer.eos_token
+
+        user_id2token_id = dataset.field2token_id["user_id"]
+        item_id2token_id = dataset.field2token_id["item_id"]
+        n_user, n_item = len(user_id2token_id), len(item_id2token_id)
+        n_batch = 64
+        # self.item_embed = torch.rand((n_item + 1, 4096))
+        # self.interest_embed = torch.rand((n_user, 5, 4096))
+        # return
+
+        def encode_texts(texts, tokenizer, llm):
+            t_input = tokenizer(texts, padding=True, return_tensors="pt").to(self.device)
+            attention_mask = t_input.attention_mask
+            with torch.no_grad():
+                last_hidden_state = llm(**t_input, output_hidden_states=True).hidden_states[-1]
+
+            sum_embeddings = torch.sum(last_hidden_state * attention_mask.unsqueeze(-1), dim=1)
+            num_of_none_padding_tokens = torch.sum(attention_mask, dim=-1).unsqueeze(-1)
+            sentence_embeddings = sum_embeddings / num_of_none_padding_tokens
+            return sentence_embeddings.to("cpu")
+
+        # load item embed
+        item_names = [None] * n_item
+        with open(Path(dataset.dataset_path, f"{dataset.dataset_name}.item"), "r") as fp:
+            reader = csv.reader(fp, delimiter="\t")
+            next(reader)
+
+            for row in reader:
+                item_id, item_name = row[0], row[1]
+                if item_id not in item_id2token_id:
+                    continue
+                token_id = int(item_id2token_id[item_id])
+                item_names[token_id] = item_name
         
+        self.item_embed = torch.zeros((n_item + 1, 4096))
+        for i in trange(1, n_item, n_batch, desc="Item embed"):
+            batch = min(n_batch, n_item - i)
+            self.item_embed[i:i+batch] = encode_texts(
+                item_names[i:i+batch], tokenizer, llm
+            )
+
+        # load interest embed
+        # interests = [None] * n_user
+        # # for interest_file in Path("../template-testing/result", dataset.dataset_name, "interest/llama3_v1").iterdir():
+        # for interest_file in Path("../llama3_v1").iterdir():
+        #     with open(interest_file, "r") as fp:
+        #         token_id = int(user_id2token_id[interest_file.stem])
+        #         interests[token_id] = np.array([line.strip() for line in fp])
+
+        # self.interest_embed = torch.zeros((n_user, 5, 4096))
+        # for i in trange(1, n_user, n_batch, desc="Interest embed"):
+        #     batch = min(n_batch, n_user - i)
+        #     texts = np.concatenate(interests[i:i+batch]).tolist()
+        #     self.interest_embed[i:i+batch] = encode_texts(
+        #         texts, tokenizer, llm
+        #     ).view(batch, 5, -1)
+    
+    def _sl_augmentation(self,):
+        # Same target index
+        target_item_list = self.dataset.inter_feat[self.iid_field].numpy()
+        index = {}
+        for i, key in enumerate(target_item_list):
+            if key not in index:
+                index[key] = [i]
+            else:
+                index[key].append(i)
+        self.same_target_index = index
+
+    def _shuffle(self):
+        super()._shuffle()
+        self._sl_augmentation()
     
     def _contrastive_learning_augmentation(self, cur_data):
         
         sequences = cur_data[self.iid_list_field]
         lengths = cur_data[self.item_list_length_field]
-        aug_seq1, aug_len1 = self._augmentation(sequences, lengths, aug_type=self.aug_type1)
-        aug_seq2, aug_len2 = self._augmentation(sequences, lengths, aug_type=self.aug_type2)
-        cur_data.update(Interaction({'aug1': aug_seq1, 'aug_len1': aug_len1,
-                                     'aug2': aug_seq2, 'aug_len2': aug_len2}))
+
+        aug_seq, aug_len = self._augmentation2(cur_data)
+
+        cur_data.update(Interaction({
+            # 'aug1': aug_seq1, 'aug_len1': aug_len1,
+            # 'aug2': aug_seq2, 'aug_len2': aug_len2,
+            'aug': aug_seq, 'aug_len': aug_len,
+        }))
+
         return cur_data
 
     def _augmentation(self, sequences, lengths, targets=None, aug_type='random'):
@@ -1263,4 +1369,36 @@ class LLMRecTrainDataLoader(CLTrainDataLoader):
             
             aug_sequences[i][:], aug_lengths[i] = aug_func[aug_idx](seq.clone(), length)
 
+        return aug_sequences, aug_lengths
+
+    def _augmentation2(self, cur_data):
+        sequences = cur_data[self.iid_list_field]
+        lengths = cur_data[self.item_list_length_field]
+
+        targets = cur_data[self.iid_field].numpy()
+
+        # target_item_embed = self.item_embed[sequences]
+        # target_item_embed = torch.sum(target_item_embed, dim=1) / lengths.unsqueeze(1)
+
+        # select_index = []
+        # for i, target in enumerate(targets):
+        #     indices = self.same_target_index[target]
+
+        #     aug_sequences = self.dataset[self.iid_list_field][indices]
+        #     aug_lengths = self.dataset[self.item_list_length_field][indices]
+
+        #     source_item_embed = self.item_embed[aug_sequences]  # (n_aug, N, D)
+        #     source_item_embed = torch.sum(source_item_embed, dim=1) / aug_lengths.unsqueeze(1)  # (n_aug, D)
+
+        #     sim = F.relu(
+        #         torch.mm(source_item_embed, target_item_embed[i].unsqueeze(1)).squeeze(1)
+        #     ).numpy()
+        #     sim /= sim.sum()
+
+        #     select_index.append(np.random.choice(indices, p=sim))
+        
+        select_index = [np.random.choice(self.same_target_index[target]) for target in targets]
+        aug_sequences = self.dataset[self.iid_list_field][select_index]
+        aug_lengths = self.dataset[self.item_list_length_field][select_index]
+        assert (targets == self.dataset[self.iid_field][select_index].numpy()).all()
         return aug_sequences, aug_lengths

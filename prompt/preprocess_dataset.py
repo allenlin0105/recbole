@@ -6,13 +6,14 @@ from pathlib import Path
 from tqdm import tqdm
 
 
-DATASET = "amazon_toy"
+# DATASET = "amazon_toy"
+DATASET = "ml-100k"
 
 item_df = pd.read_csv(f"dataset/{DATASET}/{DATASET}.item", sep="\t")
 inter_df = pd.read_csv(f"dataset/{DATASET}/{DATASET}.inter", sep="\t")
 
-title_key = "title:token"
-# title_key = "movie_title:token_seq"
+# title_key = "title:token"
+title_key = "movie_title:token_seq"
 
 item_dict = (
     item_df.astype("str")[["item_id:token", title_key]]
