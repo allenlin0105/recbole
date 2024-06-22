@@ -1,17 +1,18 @@
 # Environment Settings
-gpu_id: 1
+gpu_id: 5
 
 # Model Settings
 n_layers: 2
 n_heads: 2
 hidden_size: 64
 inner_size: 256
-hidden_dropout_prob: 0.1
-attn_dropout_prob: 0.1
+hidden_dropout_prob: 0.5
+attn_dropout_prob: 0.5
 hidden_act: gelu
 layer_norm_eps: 1.e-12
-initializer_range: 0.02
+initializer_range: 0.01
 loss_type: CE  # ['CE', 'BPR']
+learning_rate: 0.001
 
 similarity_type: dot  # ['dot', 'cos']
 tau: 1
