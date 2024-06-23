@@ -54,7 +54,7 @@ class LLMRec(CL4Rec):
         user_id2token_id = dataset.field2token_id["user_id"]
         item_id2token_id = dataset.field2token_id["item_id"]
         n_user, n_item = len(user_id2token_id), len(item_id2token_id)
-        n_batch = 64
+        n_batch = 16
         # self.item_embed = torch.rand((n_item + 1, 64)).to(self.device)
         # self.interest_embed = torch.rand((n_user, 64)).to(self.device)
         # return
