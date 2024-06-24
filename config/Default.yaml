@@ -17,6 +17,7 @@ epochs: 9999
 eval_args:
   order: TO
   split: 
+    # LS: "valid_and_test"
     RS: [7, 1, 2]
   mode: full
 metrics: [Recall, Precision, NDCG, MAP, Hit]
