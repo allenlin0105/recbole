@@ -19,8 +19,11 @@ class LLMRec(CL4Rec):
 
         # load parameters info
         self.device = config["gpu_id"]
+        self.cl_remove_topk = config["cl_remove_topk"]
+        self.cl_smooth = config["cl_smooth"]
         self.cor_lambda = config["cor_lambda"]
-        self.cor_loss_fct = nn.KLDivLoss(reduction="batchmean")
+        self.cor_loss_fct1 = nn.MSELoss()
+        self.cor_loss_fct2 = nn.KLDivLoss(reduction="batchmean")
 
         self._load_embed(dataset)
 
@@ -155,39 +158,92 @@ class LLMRec(CL4Rec):
         logits, labels = self.new_info_nce(un_aug_seq_output, su_aug_seq_output, pos_items)
         cl_loss = self.cl_lambda * self.cl_loss_fct(logits, labels)
 
-        cor_loss = self.cor_lambda * self.calculate_cor_loss(interaction, un_aug_seq_output, su_aug_seq_output)
-        return tuple([loss, cl_loss, cor_loss])
+        cor_loss2 = self.calculate_cor_loss(interaction, un_aug_seq_output, su_aug_seq_output)
+        return tuple([loss, cl_loss, self.cor_lambda * cor_loss2])
 
     def new_info_nce(self, z_i, z_j, pos_items):
         cur_batch_size = z_i.size(0)
         N = 2 * cur_batch_size
         z = torch.cat((z_i, z_j), dim=0)  # [2B H]
+        if cur_batch_size != self.batch_size:
+            mask = self.mask_correlated_samples(cur_batch_size)
+        else:
+            mask = self.default_mask
     
         if self.similarity_type == 'cos':
             sim = self.sim(z.unsqueeze(1), z.unsqueeze(0), dim=2) / self.tau
         elif self.similarity_type == 'dot':
             sim = self.sim(z, z.T) / self.tau
-        # print(sim.shape)
+
+        sim_i_j = torch.diag(sim, cur_batch_size)
+        sim_j_i = torch.diag(sim, -cur_batch_size)
+        positive_samples = torch.cat((sim_i_j, sim_j_i), dim=0).reshape(N, 1)  # [2B, 1]
 
         pos_llama_embed = self.item_embed[pos_items.cpu().tolist()]  # [B H]
         pos_llama_embed = torch.cat((pos_llama_embed, pos_llama_embed), dim=0)
         pos_sim = F.cosine_similarity(pos_llama_embed.unsqueeze(1), pos_llama_embed.unsqueeze(0), dim=2)  # [2B 2B]
+        # pos_sim = pos_sim.fill_diagonal_(-100)
 
-        mask = torch.ones((N, N)).bool()
+        sim = sim[mask].reshape(N, -1)
+        pos_sim = pos_sim[mask].reshape(N, -1)
 
-        _, mask_index = torch.topk(pos_sim, 32, dim=1)
+        mask = torch.ones(sim.shape).bool()
         batch_index = torch.arange(N).reshape(N, 1)
+        _, mask_index = torch.topk(pos_sim, self.cl_remove_topk, dim=1)
         mask[batch_index, mask_index] = 0
 
-        sim_i_j = torch.diag(sim, cur_batch_size)
-        sim_j_i = torch.diag(sim, -cur_batch_size)
+        negative_samples = sim[mask].reshape(N, -1)
+        
+        logits = torch.cat((positive_samples, negative_samples), dim=1)
+        
+        pos_sim = F.softmax(pos_sim[mask].reshape(N, -1), dim=1)
+        pos_sim *= self.cl_smooth
 
-        positive_samples = torch.cat((sim_i_j, sim_j_i), dim=0).reshape(N, 1)  # [2B, 1]
-        negative_samples = sim[mask].reshape(N, -1)  # [2B, 2(B-1)]
+        labels = torch.full((N, 1), 1 - self.cl_smooth).to(z_i.device)
+        labels = torch.cat((labels, pos_sim), dim=1)
 
-        logits = torch.cat((positive_samples, negative_samples), dim=1)  # [2B, 2B-1]
+        # index = -1
+        # folder = Path("sim_tensor")
+        # for file in folder.iterdir():
+        #     fetched_index = int(file.name.replace(".pt", ""))
+        #     index = max(index, fetched_index)
+        # index += 1
+        # torch.save(pos_sim, folder.joinpath(f"{index}.pt"))
+
+        # neg_mask = torch.ones((N, N)).bool()
+        # neg_mask = neg_mask.fill_diagonal_(0)
+        # neg_mask[batch_index, mask_index] = 0
+
+        # POS_K = 10
+        # POS_K = min(max(POS_K, (pos_sim > 0.95).sum(axis=1).max().item()), self.cl_remove_topk - 1)
+
+        # pos_mask = torch.zeros((N, N)).bool()
+        # pos_mask[batch_index, mask_index] = 1
+        # n_pos = self.cl_remove_topk
+
+        # negative_samples = sim[neg_mask].reshape(N, -1)  # [2B, 2(B-1)]
+
+        # positive_samples = sim[pos_mask].reshape(N * n_pos, 1)
+        # negative_samples = sim[neg_mask].reshape(N, -1)
+        # negative_samples = negative_samples.repeat(1, n_pos).reshape(N * n_pos, -1)
+
+        # logits = torch.cat((positive_samples, negative_samples), dim=1)  # [2B, 2B-1]
         # the first column stores positive pair scores
-        labels = torch.zeros(N, dtype=torch.long, device=z_i.device)
+        # labels = torch.zeros(N, dtype=torch.long, device=z_i.device)
+
+        # pos_label_i_j = torch.diag(pos_sim, cur_batch_size)
+        # pos_label_j_i = torch.diag(pos_sim, -cur_batch_size)
+        # pos_labels = torch.cat((pos_label_i_j, pos_label_j_i), dim=0).reshape(N, 1)
+        # neg_labels = pos_sim[mask].reshape(N, -1)
+        # labels = F.softmax(torch.cat((pos_labels, neg_labels), dim=1), dim=1)
+
+        ### Assign pos_sim as labels
+        # mask = torch.ones((N, N)).bool()
+        # mask = mask.fill_diagonal_(0)
+
+        # logits = sim[mask].reshape(N, -1)
+        # labels = F.softmax(pos_sim[mask].reshape(N, -1), dim=1)
+    
         return logits, labels
 
     def calculate_cor_loss(self, interaction, seq_output1, seq_output2):
@@ -217,14 +273,13 @@ class LLMRec(CL4Rec):
         aug_logits1 = F.softmax(torch.matmul(seq_output1, test_item_emb.transpose(0, 1)), dim=1)
         aug_logits2 = F.softmax(torch.matmul(seq_output2, test_item_emb.transpose(0, 1)), dim=1)
         aug_logits = torch.cat([aug_logits1, aug_logits2])
-        
-        loss = self.cor_loss_fct(aug_logits.log(), target_logits)
-        return loss
 
         # confidence_deficit = aug_confidence1 - aug_confidence2
-        # distance = 1 - F.cosine_similarity(seq_output1, seq_output2) / self.tau
-        # loss = self.cor_loss_fct(distance, confidence_deficit)
-        # return loss
+        # distance = 1 - F.cosine_similarity(seq_output1, seq_output2)
+        # loss1 = self.cor_loss_fct1(distance, confidence_deficit)
+        
+        loss2 = self.cor_loss_fct2(aug_logits.log(), target_logits)
+        return loss2
 
         # mask = torch.ones((batch_size, batch_size)).triu(diagonal=1).to(self.device)
         # user_distance = (1 - torch.matmul(
