@@ -183,7 +183,7 @@ class KMeans(object):
         self.num_cluster = num_cluster
         self.max_points_per_centroid = 4096
         self.min_points_per_centroid = 0
-        self.gpu_id = 0
+        self.gpu_id = gpu_id
         self.device = device
         self.first_batch = True
         self.hidden_size = hidden_size
@@ -191,7 +191,7 @@ class KMeans(object):
         self.centroids = []
 
     def __init_cluster(self, hidden_size, verbose=False, niter=20, nredo=5, max_points_per_centroid=4096, min_points_per_centroid=0):
-        print(" cluster train iterations:", niter)
+        print("ßcluster train iterations:", niter)
         clus = faiss.Clustering(hidden_size,       # dimension of the vectors
                                 self.num_cluster)  # number of centroids
         clus.verbose = verbose
