@@ -20,6 +20,7 @@ class LLMRec(CL4Rec):
         # load parameters info
         self.device = config["gpu_id"]
         self.cl_remove_topk = config["cl_remove_topk"]
+        self.cl_remove_sim = config["cl_remove_sim"]
         self.cl_smooth = config["cl_smooth"]
         self.cor_lambda = config["cor_lambda"]
         self.cor_loss_fct1 = nn.MSELoss()
@@ -178,29 +179,37 @@ class LLMRec(CL4Rec):
         sim_i_j = torch.diag(sim, cur_batch_size)
         sim_j_i = torch.diag(sim, -cur_batch_size)
         positive_samples = torch.cat((sim_i_j, sim_j_i), dim=0).reshape(N, 1)  # [2B, 1]
+        negative_samples = sim[mask].reshape(N, -1)  # [2B, 2(B-1)]
 
         pos_llama_embed = self.item_embed[pos_items.cpu().tolist()]  # [B H]
         pos_llama_embed = torch.cat((pos_llama_embed, pos_llama_embed), dim=0)
         pos_sim = F.cosine_similarity(pos_llama_embed.unsqueeze(1), pos_llama_embed.unsqueeze(0), dim=2)  # [2B 2B]
         # pos_sim = pos_sim.fill_diagonal_(-100)
 
-        sim = sim[mask].reshape(N, -1)
+        # sim = sim[mask].reshape(N, -1)
         pos_sim = pos_sim[mask].reshape(N, -1)
+        ignore_dim1, ignore_dim2 = (pos_sim >= self.cl_remove_sim).nonzero(as_tuple=True)
 
-        mask = torch.ones(sim.shape).bool()
-        batch_index = torch.arange(N).reshape(N, 1)
-        _, mask_index = torch.topk(pos_sim, self.cl_remove_topk, dim=1)
-        mask[batch_index, mask_index] = 0
+        # mask = torch.ones(sim.shape).bool()
+        # batch_index = torch.arange(N).reshape(N, 1)
+        # _, mask_index = torch.topk(pos_sim, self.cl_remove_topk, dim=1)
+        # mask[batch_index, mask_index] = 0
 
-        negative_samples = sim[mask].reshape(N, -1)
+        # negative_samples = sim[mask].reshape(N, -1)
         
+        negative_samples[ignore_dim1, ignore_dim2] = 0  # let the ignore tensor have no effect
         logits = torch.cat((positive_samples, negative_samples), dim=1)
+
+        pos_sim[ignore_dim1, ignore_dim2] = float("-inf")
+        pos_sim = F.softmax(pos_sim, dim=1) * self.cl_smooth
         
-        pos_sim = F.softmax(pos_sim[mask].reshape(N, -1), dim=1)
-        pos_sim *= self.cl_smooth
+        # pos_sim = F.softmax(pos_sim[mask].reshape(N, -1), dim=1)
+        # pos_sim *= self.cl_smooth
 
         labels = torch.full((N, 1), 1 - self.cl_smooth).to(z_i.device)
         labels = torch.cat((labels, pos_sim), dim=1)
+
+        # labels = torch.zeros(N, dtype=torch.long, device=z_i.device)
 
         # index = -1
         # folder = Path("sim_tensor")
